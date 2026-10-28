@@ -224,7 +224,7 @@ stdout 有且只有一个 JSON 对象，无其他输出。日志、进度、模�
 
 - 默认允许前台。守卫进程在 run 开始时就启动（`--no-overlay`、`--background-only` 或策略禁止前台时除外），它负责置顶点击穿透的"AI 操控中 · 按 ESC 中止"提示条和 `WH_KEYBOARD_LL` ESC 钩子；观察和模型决策阶段同样显示接管提示。
 - 任何前台动作之前复核守卫就绪。守卫起不来 → 记 `overlay_not_shown` 警告并继续只读/后台工作，但不执行前台动作，前台请求返回 `blocked` / `foreground_not_allowed`。
-- 覆盖层必须对截图不可见：窗口加 `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)`（Win10 2004+，本机 Win11 支持）。驱动走 PrintWindow / DXGI 都拍不到它。
+- 覆盖层必须对截图不可见，但不能用 `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)`：本机实测（Win11 26200 + NVIDIA RTX 5070 Ti）该调用会让这个每像素 alpha 的分层窗口整块失效——窗口存在、置顶、可见标志为真、也在绘制，但屏幕上什么都不显示。改为截图期间隐藏窗口：wrapper 截屏前写 `overlay-hide.json`，守卫 `ShowWindow(hwnd, 0)` 后回 `overlay-hidden.json` 确认，截完删标记，守卫下一帧重新 `ShowWindow(hwnd, 4)` + 置顶层序。握手 1 秒超时，失败只记 `overlay_hide_unconfirmed` 警告，不阻断截图。`SetWindowDisplayAffinity` 仍用于从未显示的探测窗口，`health` 用它证明 API 可用。
 - 覆盖层必须能盖住全屏应用：`WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW`，配合 DWM 合成。无边框全屏（DXGI flip，现代游戏和浏览器的主流做法）可以正常覆盖。
 - 真正的 exclusive fullscreen（旧式独占交换链）会绕过 DWM，任何顶层窗口都盖不上去。检测到目标窗口是全屏独占时，改为在 run 开始时弹一次前置确认（"目标独占全屏，覆盖层不可见，ESC 仍可用"），ESC 钩子照装，不阻断执行。这一点写进 SKILL.md。
 - ESC 命中 → 写 `stop.flag`，吞掉该按键，杀掉在途 `cua-driver call` 子进程，返回 `3` / `user_escape`。
@@ -244,18 +244,18 @@ stdout 有且只有一个 JSON 对象，无其他输出。日志、进度、模�
 
 **AI 光标**
 
-- 一个放大的箭头指针，约系统光标 3.5 倍。白色粗描边 + 浅蓝半透明填充 + 轻微投影，保证在浅色和深色背景上都清楚。
+- 箭头指针与系统光标同尺寸（系统光标 32 px 时箭头 32 px）。白色粗描边 + 浅蓝半透明填充 + 轻微投影，保证在浅色和深色背景上都清楚。
 - 箭头尖端就是真实点击点，热点严格对齐尖端，不做偏移。
 - 跟随真实光标：轮询 `GetCursorPos`，60 Hz，做约 60 ms 的平滑插值，避免瞬移。
 - 坐标动作：先把箭头平滑移到目标点，再执行点击；点击瞬间给一圈 200 ms 的收缩脉冲。
 - 元素动作（UIA 或后台投递，没有坐标）：不动箭头，只在胶囊里写清操作的是哪个元素。
-- 系统光标保持可见，不隐藏——用户还要自己用机器。若桌面级截图里带上了系统光标，属于可接受的小瑕疵。
+- 接管期间隐藏系统光标：覆盖层是点击穿透窗口，`WM_SETCURSOR` 不会送到它，Windows 没有按窗口隐藏指针的办法，所以守卫用 `SetSystemCursor` 把各标准光标换成 1×1 全透明光标，屏幕上只剩覆盖层的箭头。该状态是系统级的，崩溃后也会保留，因此 `close()` 和 wrapper 的 `Guard.close()` 都会用 `SPI_SETCURSORS` 还原；`OCR_SIZE`、`OCR_ICOCUR` 不接受 `SetSystemCursor`，不在替换列表里。部分失败只记 `cursor_hide_partial` 警告，不影响 run。
 
 **实现约束**
 
 - 分层窗口 + 每像素 alpha（`UpdateLayeredWindow`），不用色键透明，否则抗锯齿边缘会出现彩边。
 - 样式 `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`：点击穿透、不进 Alt-Tab、不抢焦点。
-- 箭头和描边同样走 `WDA_EXCLUDEFROMCAPTURE`，不进任何截图。
+- 箭头和描边跟随整个覆盖层一起在截图期间隐藏，不进任何截图。
 - 渲染循环、ESC 钩子、`stop.flag` 轮询放在同一个进程里，随 run 生死。
 - 目标窗口是真 exclusive fullscreen 时覆盖层画不上去，此时至少保证 ESC 钩子和开跑前提示可用。
 

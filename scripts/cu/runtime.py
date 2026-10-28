@@ -5,6 +5,7 @@ import copy
 import json
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from .artifacts import RunFiles, session_id, sweep
@@ -79,6 +80,22 @@ class Runtime:
             self.files = RunFiles(self.session, keep=self.options.keep_artifacts, destination=self.options.artifacts_dir, warn=self.warn)
             self.policy = Policy(self.root / "policy.json", self.warn)
             self.deadline = min(self.deadline, self.started + self.policy.data["max_runtime_sec"])
+            self.foreground_allowed = not (self.options.background_only or self.options.no_overlay or self.policy.data["foreground"] == "deny")
+            if self.foreground_allowed:
+                # Present the takeover overlay before anything else: driver startup and the first model
+                # call take seconds, and the user must be able to see and abort the takeover from the
+                # first moment. A guard that cannot start never authorizes foreground input later;
+                # ensure_guard() fails then.
+                try:
+                    self.ensure_guard()
+                except Failure as exc:
+                    guard, self.guard = self.guard, None
+                    try:
+                        if guard is not None and hasattr(guard, "close"):
+                            guard.close()
+                    except Exception as close_exc:
+                        self.warn(f"guard_cleanup_failed: {close_exc}")
+                    self.warn(f"overlay_not_shown: 接管提示未能启动：{exc.detail}")
             self.model = self.model_factory(self.root / "model.json", check=self.check, remaining=self.remaining)
             if self.driver_factory is None:
                 from .driver import Driver
@@ -90,21 +107,6 @@ class Runtime:
             self.driver.require_capabilities()
             if hasattr(self.driver, "bind_input_cancellation"):
                 self.driver.bind_input_cancellation()
-            self.foreground_allowed = not (self.options.background_only or self.options.no_overlay or self.policy.data["foreground"] == "deny")
-            if self.foreground_allowed:
-                # Present the takeover overlay for the whole run, not only from the first foreground
-                # action: observation and model calls still steer the desktop. A guard that cannot
-                # start never authorizes foreground input later; ensure_guard() fails then.
-                try:
-                    self.ensure_guard()
-                except Failure as exc:
-                    guard, self.guard = self.guard, None
-                    try:
-                        if guard is not None and hasattr(guard, "close"):
-                            guard.close()
-                    except Exception as close_exc:
-                        self.warn(f"guard_cleanup_failed: {close_exc}")
-                    self.warn(f"overlay_not_shown: 接管提示未能启动：{exc.detail}")
             requested_vision = retry = desktop = False
             verification_failures = 0
             pending_expect = None
@@ -300,7 +302,10 @@ class Runtime:
             self.warn("screenshot_budget_exhausted: 已达 30 张上限，后续只提供元素树。")
             return None
         path = self.files.path / f"step_{self.steps + 1:02d}_{self.screenshots + 1:02d}.png"
-        capture_state = self.driver.observe(self.window, screenshot=path, screenshot_only=True, desktop=desktop)
+        guard = self.guard
+        hide = guard.capture_hidden if guard is not None and getattr(guard, "hide_during_capture", False) else nullcontext
+        with hide():
+            capture_state = self.driver.observe(self.window, screenshot=path, screenshot_only=True, desktop=desktop)
         for key in ("screenshot_origin", "coordinate_space", "screenshot_width", "screenshot_height", "input_origin", "input_coordinate_space"):
             if key in capture_state:
                 self.observation[key] = capture_state[key]

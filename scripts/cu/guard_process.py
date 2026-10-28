@@ -21,6 +21,9 @@ MOVE_SECONDS = 0.060
 PULSE_SECONDS = 0.200
 WDA_EXCLUDEFROMCAPTURE = 0x11
 OVERLAY_STYLE = 0x00080000 | 0x00000020 | 0x00000008 | 0x00000080 | 0x08000000
+ARROW_SCALE = 1.0
+SPI_SETCURSORS = 0x0057
+SYSTEM_CURSORS = (32512, 32513, 32514, 32515, 32516, 32641, 32642, 32643, 32644, 32645, 32646, 32648, 32649, 32650, 32651)  # OCR_SIZE and OCR_ICOCUR reject SetSystemCursor.
 FULLSCREEN_LIMITATION = "SHQueryUserNotificationState only reports system-wide exclusive Direct3D fullscreen; it cannot attribute that state to the target HWND or reliably identify every rendering backend. Window size alone is not evidence of exclusive fullscreen."
 HOOK_LIMITATION = "Hook installation is verified, but Windows provides no reliable query for later silent removal of a low-level hook. Secure-desktop input is not supported."
 
@@ -77,7 +80,7 @@ class Renderer:
         self.arrow = self._arrow()
 
     def _arrow(self):
-        size = round(self.cursor_size * 3.5)
+        size = round(self.cursor_size * ARROW_SCALE)
         scale = 3
         image = self.Image.new("RGBA", (size * scale, size * scale), (0, 0, 0, 0))
         draw = self.ImageDraw.Draw(image)
@@ -122,10 +125,13 @@ class Renderer:
         x, y = round(cursor[0]), round(cursor[1])
         if pulse_elapsed is not None and 0 <= pulse_elapsed < PULSE_SECONDS:
             progress = pulse_elapsed / PULSE_SECONDS
-            radius = 28 * (1 - progress) + 4
-            image = self.Image.new("RGBA", (70 * 3, 70 * 3))
-            self.ImageDraw.Draw(image).ellipse(tuple(round(v * 3) for v in (35 - radius, 35 - radius, 35 + radius, 35 + radius)), outline=(172, 223, 255, round(245 * (1 - progress))), width=3 * 3)
-            layers.append((x - 35, y - 35, image.resize((70, 70), self.Image.Resampling.LANCZOS)))
+            scale = self.arrow.width / 112  # The pulse is calibrated to the original arrow size.
+            radius = (28 * (1 - progress) + 4) * scale
+            side = max(20, round(70 * scale))
+            half = side / 2
+            image = self.Image.new("RGBA", (side * 3, side * 3))
+            self.ImageDraw.Draw(image).ellipse(tuple(round(v * 3) for v in (half - radius, half - radius, half + radius, half + radius)), outline=(172, 223, 255, round(245 * (1 - progress))), width=max(1, round(3 * scale)) * 3)
+            layers.append((x - round(half), y - round(half), image.resize((side, side), self.Image.Resampling.LANCZOS)))
         # The arrow's geometric tip is (2, 2) in the sprite, hence this exact offset.
         layers.append((x - 2, y - 2, self.arrow))
         return layers
@@ -220,6 +226,9 @@ class Native:
         self.mouse_callback = self.HOOKPROC(self._mouseproc)
         self.stop_writer = None
         self.swallow_escape = True
+        # SetSystemCursor is process-wide state; cleared in close() so a crash cannot leave it blank.
+        self.cursor_hidden = False
+        self.cursor_failures = []
 
     def _bind(self):
         W = self.W
@@ -235,6 +244,10 @@ class Native:
             (self.user, "DefWindowProcW", [W.HWND, W.UINT, C.c_size_t, C.c_ssize_t], C.c_ssize_t),
             (self.user, "SetWindowDisplayAffinity", [W.HWND, W.DWORD], W.BOOL),
             (self.user, "GetWindowDisplayAffinity", [W.HWND, C.POINTER(W.DWORD)], W.BOOL),
+            (self.user, "CreateCursor", [W.HINSTANCE, C.c_int, C.c_int, C.c_int, C.c_int, C.POINTER(W.BYTE), C.POINTER(W.BYTE)], W.HANDLE),
+            (self.user, "SetSystemCursor", [W.HANDLE, W.DWORD], W.BOOL),
+            (self.user, "DestroyCursor", [W.HANDLE], W.BOOL),
+            (self.user, "SystemParametersInfoW", [W.UINT, W.UINT, C.c_void_p, W.UINT], W.BOOL),
             (self.user, "SetWindowsHookExW", [C.c_int, self.HOOKPROC, W.HINSTANCE, W.DWORD], W.HHOOK),
             (self.user, "UnhookWindowsHookEx", [W.HHOOK], W.BOOL),
             (self.user, "CallNextHookEx", [W.HHOOK, C.c_int, C.c_size_t, C.c_ssize_t], C.c_ssize_t),
@@ -348,9 +361,14 @@ class Native:
         self.hwnd = self.user.CreateWindowExW(OVERLAY_STYLE, self.class_name, "Computer use guard", 0x80000000, left, top, width, height, None, None, self.instance, None)
         if not self.hwnd:
             self.fail("CreateWindowExW")
-        if not self.user.SetWindowDisplayAffinity(self.hwnd, WDA_EXCLUDEFROMCAPTURE):
-            self.fail("SetWindowDisplayAffinity")
-        self.verify_capture()
+        if probe:
+            # Only the never-shown probe window proves the API: capture exclusion applied to the live
+            # per-pixel-alpha overlay leaves it invisible on Windows 11 + NVIDIA (verified: the window
+            # is visible, topmost, uncloaked and painting, yet nothing reaches the screen). Screenshots
+            # are kept clean by hiding the overlay while the driver captures instead.
+            if not self.user.SetWindowDisplayAffinity(self.hwnd, WDA_EXCLUDEFROMCAPTURE):
+                self.fail("SetWindowDisplayAffinity")
+            self.verify_capture()
         self.hook = self.user.SetWindowsHookExW(13, self.hook_callback, self.instance, 0)  # WH_KEYBOARD_LL
         if not self.hook:
             self.fail("SetWindowsHookExW")
@@ -408,6 +426,35 @@ class Native:
         self.user.ShowWindow(self.hwnd, 4)  # SW_SHOWNOACTIVATE
         if not self.user.SetWindowPos(self.hwnd, self.W.HWND(-1), 0, 0, 0, 0, 0x0013):  # NOACTIVATE | NOMOVE | NOSIZE
             self.fail("SetWindowPos")
+        self.hide_system_cursor()
+
+    def hide_system_cursor(self):
+        """Blank every system cursor so only the overlay's pointer is visible.
+
+        Windows offers no per-window way to hide the pointer for a click-through window
+        (WM_SETCURSOR goes to the window underneath), so this replaces the system cursor
+        images with a 1x1 transparent cursor. The change is system-wide and survives a
+        crash, so close() always restores the scheme with SPI_SETCURSORS.
+        """
+        if self.cursor_hidden or self.cursor_failures:
+            return
+        and_mask, xor_mask = (self.W.BYTE * 1)(0xFF), (self.W.BYTE * 1)(0x00)  # AND=1 keeps the background, XOR=0 paints nothing.
+        failures = []
+        for cursor_id in SYSTEM_CURSORS:
+            handle = self.user.CreateCursor(self.instance, 0, 0, 1, 1, and_mask, xor_mask)
+            if not handle:
+                failures.append(cursor_id)
+            elif not self.user.SetSystemCursor(handle, cursor_id):
+                self.user.DestroyCursor(handle)
+                failures.append(cursor_id)
+        self.cursor_hidden = len(failures) < len(SYSTEM_CURSORS)
+        self.cursor_failures = failures
+
+    def restore_system_cursor(self):
+        if not (self.cursor_hidden or self.cursor_failures):
+            return
+        self.cursor_hidden, self.cursor_failures = False, []
+        self.user.SystemParametersInfoW(SPI_SETCURSORS, 0, None, 0)
 
     def cursor(self) -> tuple[int, int]:
         point = self.W.POINT()
@@ -500,6 +547,10 @@ class Native:
         def release(function, *args):
             if not function(*args):
                 failures.append(function.__name__)
+        try:
+            self.restore_system_cursor()
+        except OSError as exc:
+            failures.append(f"restore_system_cursor: {exc}")
         if self.mouse_hook:
             release(self.user.UnhookWindowsHookEx, self.mouse_hook)
             self.mouse_hook = None
@@ -552,16 +603,45 @@ class Runtime:
         self.last_status = -math.inf
         self.last_verify = -math.inf
         self.shown = False
+        self.hidden = False
         self.error = None
 
     def status(self, force=False):
         now = time.monotonic()
         if force or now - self.last_status >= 0.25:
             try:
-                write_json(self.run_dir / "guard-status.json", {"protocol": PROTOCOL, "token": self.token, "pid": os.getpid(), "parent_pid": self.parent_pid, "heartbeat": now, "phase": self.phase, "ack": self.ack, "ready": self.phase == "ready", "capture_excluded": bool(self.api.hwnd), "escape_hook": bool(self.api.hook), "mouse_observer": bool(self.api.mouse_hook), "countdown_complete": self.countdown_complete, "warnings": self.warnings, "error": self.error})
+                write_json(self.run_dir / "guard-status.json", {"protocol": PROTOCOL, "token": self.token, "pid": os.getpid(), "parent_pid": self.parent_pid, "heartbeat": now, "phase": self.phase, "ack": self.ack, "ready": self.phase == "ready", "capture_excluded": bool(self.api.hwnd), "cursor_hidden": bool(self.api.cursor_hidden), "escape_hook": bool(self.api.hook), "mouse_observer": bool(self.api.mouse_hook), "countdown_complete": self.countdown_complete, "warnings": self.warnings, "error": self.error})
             except PermissionError:
                 return  # An overlapping reader must not tear down an authorized guard.
             self.last_status = now
+
+    def sync_capture_hide(self):
+        """Hide the overlay while the wrapper captures the screen.
+
+        The overlay cannot use SetWindowDisplayAffinity: on Windows 11 with an NVIDIA
+        driver WDA_EXCLUDEFROMCAPTURE blanks this per-pixel-alpha layered window
+        entirely, so the user would never see the takeover notice. Hiding the window
+        for the duration of a capture keeps screenshots clean instead. The wrapper
+        writes overlay-hide.json before capturing and removes it afterwards; this
+        acknowledges with overlay-hidden.json once the window is actually hidden.
+        """
+        marker = self.run_dir / "overlay-hide.json"
+        request = read_json(marker) if marker.exists() else None
+        hide = isinstance(request, dict) and request.get("protocol") == PROTOCOL and request.get("token") == self.token
+        if hide == self.hidden:
+            return
+        self.hidden = hide
+        if hide:
+            self.api.user.ShowWindow(self.api.hwnd, 0)  # SW_HIDE
+        else:
+            self.shown = False  # the next present() brings it back topmost
+        try:
+            if hide:
+                write_json(self.run_dir / "overlay-hidden.json", {"protocol": PROTOCOL, "token": self.token, "hidden": True})
+            else:
+                (self.run_dir / "overlay-hidden.json").unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def stopped(self):
         self.api.pump()
@@ -667,8 +747,8 @@ class Runtime:
             if now - self.last_verify >= 0.5:
                 if tuple(api.user.GetSystemMetrics(metric) for metric in (76, 77, 78, 79)) != api.bounds:
                     raise RuntimeError("Display topology changed; restart the run before foreground input.")
-                api.verify_capture()
                 self.last_verify = now
+            self.sync_capture_hide()
             if self.phase == "confirming":
                 if api.confirmed is False or now - self.confirmation_started >= 120:
                     write_stop(self.run_dir, "user_cancel")
@@ -717,9 +797,11 @@ class Runtime:
             pulse_elapsed = None if self.pulse_started is None else now - self.pulse_started
             layers = self.renderer.layers(now, local_cursor, self.label, countdown, pulse_elapsed, *self.placement)
             api.present(self.renderer, layers)
-            if not self.shown:
+            if not self.shown and not self.hidden:
                 api.show()
                 self.shown = True
+                if api.cursor_failures and "cursor_hide_partial" not in " ".join(self.warnings):
+                    self.warnings.append(f"cursor_hide_partial: 有 {len(api.cursor_failures)} 个系统光标未能隐藏；覆盖层指针仍指示当前位置。")
             if self.stopped():
                 break
             if self.phase == "countdown":

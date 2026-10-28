@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import subprocess
 import sys
@@ -21,6 +22,7 @@ STARTUP_TIMEOUT = 12.0
 CONFIRM_TIMEOUT = 120.0
 ACTION_TIMEOUT = 5.0
 HEARTBEAT_TIMEOUT = 3.0
+CAPTURE_HIDE_TIMEOUT = 1.0
 
 
 class GuardError(RuntimeError):
@@ -77,6 +79,7 @@ class Guard:
     """
 
     probe = staticmethod(probe)
+    hide_during_capture = True
 
     def __init__(self, run_dir: Path, stop_check: Callable, warn: Callable):
         self.run_dir = Path(run_dir)
@@ -88,6 +91,7 @@ class Guard:
         self._ready = False
         self._ever_ready = False
         self._closed = False
+        self._cursor_hidden = False
         self._warnings: set[str] = set()
 
     @property
@@ -156,6 +160,8 @@ class Guard:
                 self.warn(message)
         if value.get("phase") == "error":
             raise GuardError(str(value.get("error") or "Guard process failed."))
+        if value.get("cursor_hidden") is True:
+            self._cursor_hidden = True
         if value.get("phase") == "stopped":
             raise GuardError("Guard has stopped.")
         if value.get("phase") not in ("starting", "confirming", "countdown", "action", "ready", "stopping") or type(value.get("ack")) is not int or value["ack"] < 0:
@@ -264,6 +270,48 @@ class Guard:
                 self.close()
             raise
 
+    @contextmanager
+    def capture_hidden(self):
+        """Hide the overlay for the duration of one capture, then let it return.
+
+        The overlay cannot use SetWindowDisplayAffinity: on Windows 11 with an NVIDIA
+        driver that call blanks this per-pixel-alpha layered window completely, so the
+        user never sees the takeover notice. The child hides the window on request and
+        acknowledges only after it is hidden. A failed handshake never fails the run;
+        the capture only misses its guarantee that the overlay stays out of the image.
+        """
+        marker, ack = self.run_dir / "overlay-hide.json", self.run_dir / "overlay-hidden.json"
+        if self._process is None or self._closed or not self._ever_ready:
+            yield
+            return
+        try:
+            _write_json(marker, {"protocol": PROTOCOL, "token": self._token})
+        except OSError as exc:
+            self.warn(f"overlay_hide_unavailable: 覆盖层未能隐藏，截图可能包含提示：{exc}")
+            yield
+            return
+        try:
+            acknowledged = False
+            deadline = time.monotonic() + CAPTURE_HIDE_TIMEOUT
+            while time.monotonic() < deadline:
+                value = _read_json(ack)
+                if isinstance(value, dict) and value.get("protocol") == PROTOCOL and value.get("token") == self._token and value.get("hidden") is True:
+                    acknowledged = True
+                    break
+                if self._process.poll() is not None:
+                    break
+                time.sleep(0.004)
+            if acknowledged:
+                time.sleep(0.02)  # DWM must compose the removal before the capture reads pixels
+            else:
+                self.warn("overlay_hide_unconfirmed: 覆盖层未确认隐藏，本次截图可能包含提示。")
+            yield
+        finally:
+            try:
+                marker.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def close(self) -> None:
         """Stop the child and release its native resources; keep stop.flag for the caller."""
         self._ready = False
@@ -285,3 +333,12 @@ class Guard:
                         process.wait(timeout=2)
         except (OSError, subprocess.SubprocessError) as exc:
             self.warn(f"Could not completely stop guard process: {exc}")
+        if self._cursor_hidden:
+            # The child restores the system cursor itself; repeat it here in case it was killed.
+            self._cursor_hidden = False
+            if sys.platform == "win32":
+                try:
+                    import ctypes
+                    ctypes.windll.user32.SystemParametersInfoW(0x0057, 0, None, 0)  # SPI_SETCURSORS
+                except (OSError, AttributeError) as exc:
+                    self.warn(f"Could not restore the system cursor: {exc}")
