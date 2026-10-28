@@ -26,7 +26,7 @@ python "$HOME/.claude/skills/computer-use/scripts/run.py" "把当前记事本文
 
 - `--timeout` 默认 120 秒，上限 600；`--budget` 默认 30 次模型请求，上限 100；规划和独立校验共用此预算，超限值会截到上限。
 - `--app` 可以重复，只收窄目标观察范围，不是意图路由。
-- 默认允许前台让渡，但前台动作前必须有可见覆盖层及 ESC 钩子，首次有 2 秒倒计时。
+- 默认允许前台让渡。run 一开始就启动覆盖层和 ESC 钩子（`--no-overlay`、`--background-only` 或策略禁止前台时除外），首次显示有 2 秒倒计时；前台动作前仍复核守卫就绪。
 - 用户要求不要抢焦点时用 `--background-only`。
 - `--no-overlay` 同时禁止前台动作，不能用它静默接管。
 - 默认删除所有本轮截图、transcript、runtime 和 stop.flag；失败、超时、中止也删除。只在排查时使用 `--keep-artifacts`。`--artifacts-dir` 自动开启保留。
@@ -50,7 +50,7 @@ wrapper 会在同一动作首次失败后最多重试一次；第二次 blocked 
 
 ## 操控提示与中止
 
-前台操作显示蓝色呼吸边框、顶部“AI 操控中 · 按 ESC 中止”胶囊、当前动作和放大光标。物理 ESC 被吞掉并触发中止，模型注入的 ESC 正常传给应用。wrapper 先发 session 专用 Windows 事件，再回收 CLI 并请求 end_session；原生在输入单元间检查事件与绑定的 wrapper 进程退出，允许必要释放收尾。事件未送达且会话未确认结束时守卫保留至 wrapper 退出。收尾最多等 5 秒，未确认 worker 全部退出会警告 driver_stop_unconfirmed；已投递输入与已进入的 Win32/COM 调用不能撤回。覆盖层对抓屏排除，系统光标可见。点击脉冲由实际带标记 mouse-down 触发。
+run 期间显示蓝色呼吸边框、顶部“AI 操控中 · 按 ESC 中止”胶囊、当前动作和放大光标；覆盖层随 run 启动而不是随第一个前台动作启动，所以在模型观察和决策阶段也可见。物理 ESC 被吞掉并触发中止，模型注入的 ESC 正常传给应用。wrapper 先发 session 专用 Windows 事件，再回收 CLI 并请求 end_session；原生在输入单元间检查事件与绑定的 wrapper 进程退出，允许必要释放收尾。事件未送达且会话未确认结束时守卫保留至 wrapper 退出。收尾最多等 5 秒，未确认 worker 全部退出会警告 driver_stop_unconfirmed；已投递输入与已进入的 Win32/COM 调用不能撤回。覆盖层对抓屏排除，系统光标可见。点击脉冲由实际带标记 mouse-down 触发。
 
 真正的独占全屏可能绕过 DWM，覆盖层无法显示。检测到 Direct3D 全屏信号时，守卫在开始前弹一次确认，说明覆盖层可能不可见但 ESC 仍可用；该系统级信号无法精确证明所有应用或后端的独占状态。多显示器与高 DPI 的端到端坐标验收仍需相应设备。
 

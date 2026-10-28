@@ -222,8 +222,8 @@ stdout 有且只有一个 JSON 对象，无其他输出。日志、进度、模�
 
 ### 6.3 前台与守卫
 
-- 默认允许前台。任何前台动作之前必须先启动守卫进程，它负责置顶点击穿透的"AI 操控中 · 按 ESC 中止"提示条和 `WH_KEYBOARD_LL` ESC 钩子。
-- 守卫起不来 → 不执行前台动作，返回 `blocked` / `foreground_not_allowed`。
+- 默认允许前台。守卫进程在 run 开始时就启动（`--no-overlay`、`--background-only` 或策略禁止前台时除外），它负责置顶点击穿透的"AI 操控中 · 按 ESC 中止"提示条和 `WH_KEYBOARD_LL` ESC 钩子；观察和模型决策阶段同样显示接管提示。
+- 任何前台动作之前复核守卫就绪。守卫起不来 → 记 `overlay_not_shown` 警告并继续只读/后台工作，但不执行前台动作，前台请求返回 `blocked` / `foreground_not_allowed`。
 - 覆盖层必须对截图不可见：窗口加 `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)`（Win10 2004+，本机 Win11 支持）。驱动走 PrintWindow / DXGI 都拍不到它。
 - 覆盖层必须能盖住全屏应用：`WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW`，配合 DWM 合成。无边框全屏（DXGI flip，现代游戏和浏览器的主流做法）可以正常覆盖。
 - 真正的 exclusive fullscreen（旧式独占交换链）会绕过 DWM，任何顶层窗口都盖不上去。检测到目标窗口是全屏独占时，改为在 run 开始时弹一次前置确认（"目标独占全屏，覆盖层不可见，ESC 仍可用"），ESC 钩子照装，不阻断执行。这一点写进 SKILL.md。

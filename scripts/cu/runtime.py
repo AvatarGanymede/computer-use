@@ -91,6 +91,20 @@ class Runtime:
             if hasattr(self.driver, "bind_input_cancellation"):
                 self.driver.bind_input_cancellation()
             self.foreground_allowed = not (self.options.background_only or self.options.no_overlay or self.policy.data["foreground"] == "deny")
+            if self.foreground_allowed:
+                # Present the takeover overlay for the whole run, not only from the first foreground
+                # action: observation and model calls still steer the desktop. A guard that cannot
+                # start never authorizes foreground input later; ensure_guard() fails then.
+                try:
+                    self.ensure_guard()
+                except Failure as exc:
+                    guard, self.guard = self.guard, None
+                    try:
+                        if guard is not None and hasattr(guard, "close"):
+                            guard.close()
+                    except Exception as close_exc:
+                        self.warn(f"guard_cleanup_failed: {close_exc}")
+                    self.warn(f"overlay_not_shown: 接管提示未能启动：{exc.detail}")
             requested_vision = retry = desktop = False
             verification_failures = 0
             pending_expect = None
