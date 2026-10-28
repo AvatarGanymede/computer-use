@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "apps": {"default": "allow", "deny": ["keepass.exe", "1password.exe"]},
+  "tools_denied": ["run_script", "kill_app", "clipboard_read", "start_recording", "replay_trajectory"],
+  "clipboard": {"read": "deny", "write": "allow"},
+  "files": {"write_allow": ["%USERPROFILE%\\Documents\\**"]},
+  "foreground": "allow",
+  "max_runtime_sec": 600
+}

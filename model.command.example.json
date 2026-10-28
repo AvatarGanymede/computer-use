@@ -1,0 +1,7 @@
+{
+  "adapter": "command",
+  "command": ["C:\\path\\to\\model.exe", "--json"],
+  "observation": "text",
+  "timeout_sec": 60,
+  "max_actions_per_turn": 5
+}

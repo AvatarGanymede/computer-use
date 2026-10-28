@@ -1,0 +1,8 @@
+{
+  "adapter": "openai-compatible",
+  "endpoint": "http://127.0.0.1:8080/v1/chat/completions",
+  "model": "local",
+  "observation": "vision",
+  "timeout_sec": 60,
+  "max_actions_per_turn": 5
+}

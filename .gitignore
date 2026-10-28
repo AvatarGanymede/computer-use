@@ -1,0 +1,25 @@
+venv/
+__pycache__/
+*.py[cod]
+model.json
+policy.json
+.env
+artifacts/
+
+# 本机构建调试符号（非运行时依赖）
+native/bin/*.pdb
+
+# 开发/验证材料，仅本机保留
+/tests/
+/evals/
+/REVIEW-FIXES.md
+/VERIFICATION.md
+/native/BUILD.md
+/native/apply_native_patch.py
+/native/build_native.py
+/native/test_apply_native_patch.py
+/native/artifacts.json
+/native/source-manifest.json
+/native/pe-inspection.json
+/native/verification.json
+/native/cua-driver-0.38.0.patch
